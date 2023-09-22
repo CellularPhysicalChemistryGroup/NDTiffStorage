@@ -35,6 +35,7 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import jdk.nashorn.internal.codegen.CompilerConstants;
 import mmcorej.TaggedImage;
 import mmcorej.org.json.JSONException;
 import mmcorej.org.json.JSONObject;
@@ -78,8 +79,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
    private final Integer externalMaxResLevel_;
    private String prefix_;
    Consumer<String> debugLogger_ = null;
-   private LinkedBlockingQueue<Runnable> writingTaskQueue_;
-   private LinkedBlockingQueue<ImageWrittenListener> imageWrittenListeners_ = new LinkedBlockingQueue<ImageWrittenListener>();
+   private LinkedBlockingQueue<Callable<IndexEntryData>> writingTaskQueue_;
    private HashMap<String, Class> axisTypes_ = new HashMap<String, Class>();
 
    private boolean firstImageAdded_ = false;
@@ -88,9 +88,6 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
    private static final int BUFFER_POOL_SIZE =
            System.getProperty("sun.arch.data.model").equals("32") ? 0 : 3;
    private final ConcurrentHashMap<Integer, Deque<ByteBuffer>> pooledBuffers_;
-
-   private volatile boolean discardData_ = false;
-
    private int detectedMajorVersion_;
    private volatile Exception writingException_ = null;
 
@@ -150,6 +147,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       if (tiled_) {
          xOverlap_ = StorageMD.getPixelOverlapX(summaryMD_);
          yOverlap_ = StorageMD.getPixelOverlapY(summaryMD_);
+
          tileWidth_ = fullResTileWidthIncludingOverlap_ - xOverlap_;
          tileHeight_ = fullResTileHeightIncludingOverlap_ - yOverlap_;
          lowResStorages_ = new TreeMap<Integer, ResolutionLevel>();
@@ -200,7 +198,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
          }
       });
 
-      writingTaskQueue_ = new LinkedBlockingQueue<Runnable>(savingQueueSize);
+      writingTaskQueue_ = new LinkedBlockingQueue<Callable<IndexEntryData>>(savingQueueSize);
 
 
       try {
@@ -229,9 +227,9 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
          throw new RuntimeException("Couldn't make acquisition directory");
       }
 
-      Future f = blockingWritingTaskHandoff(new Runnable() {
+      Future f = blockingWritingTaskHandoff(new Callable<IndexEntryData>() {
          @Override
-         public void run() {
+         public IndexEntryData call() {
             //create directory for full res data
             String fullResDir;
             if (tiled_) {
@@ -253,6 +251,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
                throw new RuntimeException("couldn't create Full res storage");
             }
             lowResStorages_ = new TreeMap<Integer, ResolutionLevel>();
+            return null;
          }
       });
       // Wait until the storage initialization is complete to prevent a race condition
@@ -932,10 +931,6 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       }
    }
 
-   public void discardDataForDebugging() {
-      discardData_ = true;
-   }
-
    /**
     * Throw an exception if there was an error writing to disk
     */
@@ -949,7 +944,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
     * This version works for regular, non-multiresolution data
     *
     */
-   public Future putImage(Object pixels, JSONObject metadata, HashMap<String, Object> axessss,
+   public Future<IndexEntryData> putImage(Object pixels, JSONObject metadata, HashMap<String, Object> axessss,
                         boolean rgb, int bitDepth, int imageHeight, int imageWidth) {
       try {
          checkForWritingException();
@@ -989,12 +984,9 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
               new EssentialImageMetadata(imageWidth, imageHeight, bitDepth, rgb));
 
    //Submit writing task on a dedicated thread
-   return blockingWritingTaskHandoff(new Runnable() {
+   return blockingWritingTaskHandoff(new Callable<IndexEntryData>() {
       @Override
-      public void run() {
-         if (discardData_) {
-            return;
-         }
+      public IndexEntryData call() {
          try {
             //Make a local copy
             HashMap<String, Object> axes = new HashMap<String, Object>(axessss);
@@ -1006,29 +998,10 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
             //write to full res storage as normal (i.e. with overlap pixels present)
             IndexEntryData ied = fullResStorage_.putImage(indexKey, pixels, metadataBytes,
                     rgb, imageHeight, imageWidth, bitDepth);
-
-            if (debugLogger_ != null) {
-               debugLogger_.accept("notifying image written listeners");
-            }
-            for (ImageWrittenListener l : imageWrittenListeners_) {
-               try {
-                  l.imageWritten(ied);
-               } catch (Exception e) {
-                  // a failure in one of these shouldn't mess up the whole thin
-                  if (debugLogger_ != null) {
-                     debugLogger_.accept("Image written listener exception");
-                     StringWriter sw = new StringWriter();
-                     PrintWriter pw = new PrintWriter(sw);
-                     e.printStackTrace(pw);
-                     debugLogger_.accept(sw.toString());
-                  } else {
-                     e.printStackTrace();
-                  }
-               }
-            }
-
+            return ied;
          } catch (Exception ex) {
             writingException_ = ex;
+            return null;
          }
       }
    });
@@ -1071,9 +1044,10 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       String indexKey = IndexEntryData.serializeAxes(StorageMD.getAxes(ti.tags));
       fullResStorage_.addToWritePendingImages(indexKey, ti,
               new EssentialImageMetadata(imageWidth, imageHeight, bitDepth, rgb));
-      return blockingWritingTaskHandoff(new Runnable() {
+      return blockingWritingTaskHandoff(new Callable<IndexEntryData>() {
          @Override
-         public void run() {
+         public IndexEntryData call() {
+            IndexEntryData ied;
             try {
                if (tiled_) {
                   if (!axes.containsKey(ROW_AXIS) || !axes.containsKey(COL_AXIS)) {
@@ -1083,11 +1057,8 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
                imageAxes_.add(axes);
 
                //write to full res storage as normal (i.e. with overlap pixels present)
-               IndexEntryData ied = fullResStorage_.putImage(
+               ied = fullResStorage_.putImage(
                        indexKey, pixels, metadataBytes, rgb, imageHeight, imageWidth, bitDepth);
-               for (ImageWrittenListener l : imageWrittenListeners_) {
-                  l.imageWritten(ied);
-               }
 
                if (tiled_) {
                   //check if maximum resolution level needs to be updated based on full size of image
@@ -1105,6 +1076,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
             } catch (IOException | ExecutionException | InterruptedException ex) {
                throw new RuntimeException(ex.toString());
             }
+            return ied;
          }
       });
    }
@@ -1122,6 +1094,12 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
    public TaggedImage getImage(HashMap<String, Object> axes) {
       //full resolution
       return getImage(axes, 0);
+   }
+
+   @Override
+   public TaggedImage getSubImage(HashMap<String, Object> axes, int xOffset, int yOffset, int width,
+                                  int height) {
+      return getDisplayImage(axes, 0, xOffset, yOffset, width, height);
    }
 
    @Override
@@ -1163,8 +1141,8 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
    @Override
    public TaggedImage getImage(HashMap<String, Object> axes, int dsIndex) {
       //return a single tile from the full res image
-      if (fullResStorage_ == null || lowResStorages_ == null ||
-              (!lowResStorages_.containsKey(dsIndex) && dsIndex != 0) ){
+      if (fullResStorage_ == null || (tiled_ && lowResStorages_ == null) ||
+              (tiled_ && !lowResStorages_.containsKey(dsIndex) && dsIndex != 0) ){
          return null;
       }
       if (dsIndex == 0) {
@@ -1174,20 +1152,15 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       }
    }
 
-   @Override
-   public void addImageWrittenListener(ImageWrittenListener iwl) {
-      imageWrittenListeners_.add(iwl);
-   }
-
-   private Future blockingWritingTaskHandoff(Runnable r) {
+   private Future<IndexEntryData> blockingWritingTaskHandoff(Callable<IndexEntryData> r) {
       //Wait if queue is full, otherwise add and signal to running executor do it
       try {
-         Future f = writingExecutor_.submit(new Runnable() {
+         Future<IndexEntryData> f = writingExecutor_.submit(new Callable<IndexEntryData>() {
             @Override
-            public void run() {
+            public IndexEntryData call() {
                try {
-                  writingTaskQueue_.take().run();
-               } catch (InterruptedException e) {
+                  return writingTaskQueue_.take().call();
+               } catch (Exception e) {
                   throw new RuntimeException(e);
                }
             }
@@ -1209,14 +1182,14 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       if (debugLogger_ != null) {
          debugLogger_.accept("Finished writing. Remaining writing task queue size = " + writingTaskQueue_.size());
       }
-      blockingWritingTaskHandoff(new Runnable() {
+      blockingWritingTaskHandoff(new Callable<IndexEntryData>() {
          @Override
-         public void run() {
+         public IndexEntryData call() {
             if (debugLogger_ != null) {
                debugLogger_.accept("Finishing writing executor");
             }
             if (finished_) {
-               return;
+               return null;
             }
             if (debugLogger_ != null) {
                debugLogger_.accept("Finishing fullres storage");
@@ -1244,17 +1217,10 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
                }
                w.finishedWriting();
             }
-            for (ImageWrittenListener l : imageWrittenListeners_) {
-               l.imageWritten(IndexEntryData.createFinishedEntry());
-            }
-//            for (ImageWrittenListener l : imageWrittenListeners_) {
-//               l.awaitCompletion();
-//            }
-            imageWrittenListeners_ = null;
             if (debugLogger_ != null) {
                debugLogger_.accept("Display settings written");
             }
-            
+            return null;
          }
       });
       if (debugLogger_ != null) {
@@ -1274,6 +1240,11 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       if (debugLogger_ != null) {
          debugLogger_.accept("Writing executor complete");
       }
+   }
+
+   @Override
+   public void addImageWrittenListener(ImageWrittenListener iwc) {
+      //deprecated
    }
 
    public boolean isFinished() {
