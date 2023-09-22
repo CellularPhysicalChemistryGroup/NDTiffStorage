@@ -30,6 +30,8 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -259,6 +261,148 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
       } catch (Exception e) {
          throw new RuntimeException("Couldn't initialize storage");
       }
+   }
+
+   
+   //This is for adding more storage hopefully...
+   public NDTiffStorage(String dir, String name, boolean tiled,
+                        Integer externalMaxResLevel, int savingQueueSize,
+                        Consumer<String> debugLogger) {
+      externalMaxResLevel_ = externalMaxResLevel;
+      tiled_ = tiled;
+      prefix_ = name;
+      debugLogger_ = debugLogger;
+
+      if (BUFFER_POOL_SIZE > 0) {
+         pooledBuffers_ = new ConcurrentHashMap<Integer, Deque<ByteBuffer>>();
+      } else {
+         pooledBuffers_ = null;
+      }
+
+      loaded_ = false;
+      writingExecutor_ = Executors.newSingleThreadExecutor(new ThreadFactory() {
+         @Override
+         public Thread newThread(Runnable r) {
+            return new Thread(r, "Multipage Tiff data writing executor");
+         }
+      });
+
+      writingTaskQueue_ = new LinkedBlockingQueue<Runnable>(savingQueueSize);
+
+
+//      try {
+//         //make a copy in case tag changes are needed later
+//         summaryMD_ = new JSONObject(summaryMetadata.toString());
+//         if (tiled) {
+//            StorageMD.setPixelOverlapX(summaryMD_, xOverlap_);
+//            StorageMD.setPixelOverlapY(summaryMD_, yOverlap_);
+//         }
+//         StorageMD.setTiledStorage(summaryMD_, tiled_);
+//      } catch (JSONException ex) {
+//         throw new RuntimeException("Couldnt copy summary metadata");
+//      }
+
+//      try {
+//         if (!createDir) {
+//            //  In MM MDAs, top level dir is created by other code
+//            directory_ = dir;
+//         } else {
+//            uniqueAcqName_ = getUniqueAcqDirName(dir, name);
+//            //create acqusition directory for actual data
+//            directory_ = dir + (dir.endsWith(File.separator) ? "" : File.separator) + uniqueAcqName_;
+//         }
+//
+//      } catch (Exception e) {
+//         throw new RuntimeException("Couldn't make acquisition directory");
+//      }
+        uniqueAcqName_ = name;
+        directory_ = dir +"/"+ uniqueAcqName_ + "/";
+
+//      Future f = blockingWritingTaskHandoff(new Runnable() {
+//         @Override
+//         public void run() {
+        try{
+            //create directory for full res data
+            String fullResDir;
+            if (tiled_) {
+               fullResDir = directory_ + (dir.endsWith(File.separator) ? "" : File.separator) + FULL_RES_SUFFIX;
+            } else {
+               fullResDir = directory_;
+            }
+            try {
+               createDir(fullResDir);
+            } catch (Exception ex) {
+               throw new RuntimeException("couldn't create saving directory");
+            }
+
+            try {
+               //Create full Res storage
+               fullResStorage_ = new ResolutionLevel(fullResDir, false, null,//fullResDir, false, summaryMD_,
+                       NDTiffStorage.this, prefix_);
+            } catch (IOException ex) {
+               throw new RuntimeException("couldn't create Full res storage");
+            }
+            //lowResStorages_ = new TreeMap<Integer, ResolutionLevel>();
+            
+            
+            //NOW ITEMS 
+            summaryMD_ = fullResStorage_.getSummaryMetadata();
+//            try {
+//               tiled_ = StorageMD.getTiledStorage(summaryMD_);
+//            } catch (Exception e) {
+//               tiled_ = true; //Backwards compat
+//            }
+
+//            try {
+//               String path = dir + (dir.endsWith(File.separator) ? "" : File.separator) + "display_settings.txt";
+//               byte[] data = Files.readAllBytes(Paths.get(path));
+//               displaySettings_ = new JSONObject(new String(data));
+//            } catch (Exception e) {
+//               System.err.println("Couldn't read displaysettings");
+//            }
+
+            imageAxes_.addAll(fullResStorage_.imageKeys().stream().map(s -> IndexEntryData.deserializeAxes(s))
+                    .collect(Collectors.toSet()));
+
+            //read width from the first image, to allow for datasets with different widths/heights per image
+            // Even though this won't be allowed for tiled datasets
+            fullResTileHeightIncludingOverlap_ = fullResStorage_.getFirstImageHeight();
+            fullResTileWidthIncludingOverlap_ = fullResStorage_.getFirstImageWidth();
+            if (tiled_) {
+               xOverlap_ = StorageMD.getPixelOverlapX(summaryMD_);
+               yOverlap_ = StorageMD.getPixelOverlapY(summaryMD_);
+               tileWidth_ = fullResTileWidthIncludingOverlap_ - xOverlap_;
+               tileHeight_ = fullResTileHeightIncludingOverlap_ - yOverlap_;
+               lowResStorages_ = new TreeMap<Integer, ResolutionLevel>();
+               //create low res storages
+               int resIndex = 1;
+               while (true) {
+                  String dsDir = directory_ + (directory_.endsWith(File.separator) ? "" : File.separator)
+                          + DOWNSAMPLE_SUFFIX + (int) Math.pow(2, resIndex);
+                  if (!new File(dsDir).exists()) {
+                     break;
+                  }
+                  maxResolutionLevel_ = resIndex;
+                   try {
+                       lowResStorages_.put(resIndex, new ResolutionLevel(dsDir, false,
+                               null, NDTiffStorage.this, null));
+                   } catch (IOException ex) {
+                       Logger.getLogger(NDTiffStorage.class.getName()).log(Level.SEVERE, null, ex);
+                   }
+                  resIndex++;
+               }
+            } else {
+               tileHeight_ = fullResTileHeightIncludingOverlap_;
+               tileWidth_ = fullResTileWidthIncludingOverlap_;
+            }
+//               }
+//            });
+//            // Wait until the storage initialization is complete to prevent a race condition
+//            try {
+//               f.get();
+            } catch (Exception e) {
+               throw new RuntimeException("Couldn't initialize storage");
+            }
    }
 
    static File createDir(String dir) {
