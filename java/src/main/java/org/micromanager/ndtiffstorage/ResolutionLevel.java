@@ -112,6 +112,9 @@ public final class ResolutionLevel {
                throw new RuntimeException("Couldn't open file: " + f.toString());
             }
          } else if (f.getName().endsWith("index")) {
+            if(f.getName().startsWith("._")){
+                continue;
+            } 
             indexMap = IndexEntryData.readIndexMap(f);
             if (firstImageWidth_ == 0) {
                firstImageWidth_ = (int) indexMap.values().iterator().next().pixWidth_;

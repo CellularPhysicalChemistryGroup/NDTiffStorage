@@ -265,7 +265,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
    //This is for adding more storage hopefully...
    public NDTiffStorage(String dir, String name, boolean tiled,
                         Integer externalMaxResLevel, int savingQueueSize,
-                        Consumer<String> debugLogger) {
+                        Consumer<String> debugLogger, String localdir) {
       externalMaxResLevel_ = externalMaxResLevel;
       tiled_ = tiled;
       prefix_ = name;
@@ -314,7 +314,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
 //         throw new RuntimeException("Couldn't make acquisition directory");
 //      }
         uniqueAcqName_ = name;
-        directory_ = dir +"/"+ uniqueAcqName_ + "/";
+        String directoryFull_ = dir +"/"+ uniqueAcqName_ + "/";
 
 //      Future f = blockingWritingTaskHandoff(new Runnable() {
 //         @Override
@@ -323,9 +323,9 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
             //create directory for full res data
             String fullResDir;
             if (tiled_) {
-               fullResDir = directory_ + (dir.endsWith(File.separator) ? "" : File.separator) + FULL_RES_SUFFIX;
+               fullResDir = directoryFull_ + (dir.endsWith(File.separator) ? "" : File.separator) + FULL_RES_SUFFIX;
             } else {
-               fullResDir = directory_;
+               fullResDir = directoryFull_;
             }
             try {
                createDir(fullResDir);
@@ -342,6 +342,13 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
             }
             //lowResStorages_ = new TreeMap<Integer, ResolutionLevel>();
             
+            
+            directory_ = localdir +"/local/"+ uniqueAcqName_ + "/";
+            try {
+               createDir(directory_);
+            } catch (Exception ex) {
+               throw new RuntimeException("couldn't create saving directory");
+            }
             
             //NOW ITEMS 
             summaryMD_ = fullResStorage_.getSummaryMetadata();
@@ -1082,6 +1089,86 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
          }
       });
    }
+   
+   
+   
+
+   
+   public void increaseMaxResolutionLevelWithoutAdding(int newMaxResolutionLevel) {
+      int oldMaxResolutionLevel = maxResolutionLevel_;
+      maxResolutionLevel_ = Math.max(newMaxResolutionLevel, oldMaxResolutionLevel);
+      if (fullResStorage_.imageKeys().size() == 0) {
+         //nothing to do because data not yet arrived
+         return;
+      }
+
+      for (int i = oldMaxResolutionLevel + 1; i <= maxResolutionLevel_; i++) {
+         //add any new one this requires
+         populateNewResolutionLevel(i, false);
+      }
+   }
+   
+   public Future putImageMultiResNotHighRes( Object pixels, JSONObject metadata, final HashMap<String, Object> axes,
+                                  boolean rgb, int bitDepth, int imageHeight, int imageWidth) {
+      try {
+         checkForWritingException();
+      } catch (Exception e) {
+         throw new RuntimeException(e);
+      }
+      TaggedImage ti = new TaggedImage(pixels, metadata);
+//      if (!firstImageAdded_) {
+//         //technically this doesnt need to be parsed here, because it should be fixed for the whole
+//         //dataset, NOT interpretted at runtime, but whatever
+//         firstImageAdded_ = true;
+//         fullResTileWidthIncludingOverlap_ = imageWidth;
+//         fullResTileHeightIncludingOverlap_ = imageHeight;
+//         tileWidth_ = fullResTileWidthIncludingOverlap_ - xOverlap_;
+//         tileHeight_ = fullResTileHeightIncludingOverlap_ - yOverlap_;
+//      }
+
+      byte[] metadataBytes = metadata.toString().getBytes();
+      String indexKey = IndexEntryData.serializeAxes(StorageMD.getAxes(ti.tags));
+//      fullResStorage_.addToWritePendingImages(indexKey, ti,
+//              new EssentialImageMetadata(imageWidth, imageHeight, bitDepth, rgb));
+      return blockingWritingTaskHandoff(new Callable<IndexEntryData>() {
+         @Override
+         public IndexEntryData call() {
+//            IndexEntryData ied;
+            try {
+               if (tiled_) {
+                  if (!axes.containsKey(ROW_AXIS) || !axes.containsKey(COL_AXIS)) {
+                     throw new RuntimeException("axes must contain row and column infor");
+                  }
+               }
+//               imageAxes_.add(axes);
+//
+//               //write to full res storage as normal (i.e. with overlap pixels present)
+//               ied = fullResStorage_.putImage(
+//                       indexKey, pixels, metadataBytes, rgb, imageHeight, imageWidth, bitDepth);
+
+               if (tiled_) {
+                  //check if maximum resolution level needs to be updated based on full size of image
+                  long fullResPixelWidth = getNumCols() * tileWidth_;
+                  long fullResPixelHeight = getNumRows() * tileHeight_;
+                  int maxResIndex = externalMaxResLevel_ != null ? externalMaxResLevel_ :
+                          (int) Math.ceil(Math.log((Math.max(fullResPixelWidth, fullResPixelHeight)
+                                  / 4)) / Math.log(2));
+                  int row = (Integer) axes.get(ROW_AXIS);
+                  int col = (Integer) axes.get(COL_AXIS);
+                  addResolutionsUpTo(maxResIndex);
+                  addToLowResStorage(ti, axes, 0, row, col, rgb, bitDepth);
+               }
+
+            } catch (ExecutionException | InterruptedException ex) {
+               throw new RuntimeException(ex.toString());
+            }
+            return null;
+         }
+      });
+   }
+   
+   
+   
    protected ConcurrentHashMap<HashMap<String, Object>, Integer> lowResProccedTo_ = new ConcurrentHashMap<>();
 
    public boolean hasImage(HashMap<String, Object> axes, int downsampleIndex) {
