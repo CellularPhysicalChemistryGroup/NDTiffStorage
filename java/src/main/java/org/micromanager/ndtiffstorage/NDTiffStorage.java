@@ -1124,7 +1124,7 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
          @Override
          public IndexEntryData call() {
 //            IndexEntryData ied;
-            try {
+//            try {
                if (tiled_) {
                   if (!axes.containsKey(ROW_AXIS) || !axes.containsKey(COL_AXIS)) {
                      throw new RuntimeException("axes must contain row and column infor");
@@ -1137,21 +1137,16 @@ public class NDTiffStorage implements NDTiffAPI, MultiresNDTiffAPI {
 //                       indexKey, pixels, metadataBytes, rgb, imageHeight, imageWidth, bitDepth);
 
                if (tiled_) {
-                  //check if maximum resolution level needs to be updated based on full size of image
-                  long fullResPixelWidth = getNumCols() * tileWidth_;
-                  long fullResPixelHeight = getNumRows() * tileHeight_;
-                  int maxResIndex = externalMaxResLevel_ != null ? externalMaxResLevel_ :
-                          (int) Math.ceil(Math.log((Math.max(fullResPixelWidth, fullResPixelHeight)
-                                  / 4)) / Math.log(2));
-                  int row = (Integer) axes.get(ROW_AXIS);
-                  int col = (Integer) axes.get(COL_AXIS);
-                  addResolutionsUpTo(maxResIndex);
-                  addToLowResStorage(ti, axes, 0, row, col, rgb, bitDepth);
+                //check if maximum resolution level needs to be updated based on full size of image
+                int row = (Integer) axes.get(ROW_AXIS);
+                int col = (Integer) axes.get(COL_AXIS);
+                // addResolutionsUpTo(maxResIndex);
+                addToLowResStorage(ti, axes, 0, row, col, rgb, bitDepth);
                }
 
-            } catch (ExecutionException | InterruptedException ex) {
-               throw new RuntimeException(ex.toString());
-            }
+//            } catch (InterruptedException ex) {
+//               throw new RuntimeException(ex.toString());
+//            }
             return null;
          }
       });
