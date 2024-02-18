@@ -101,6 +101,11 @@ public final class ResolutionLevel {
       TreeMap<String, NDTiffReader> readersByFilename = new TreeMap<>();
       for (File f : dir.listFiles()) {
          if (f.getName().endsWith(".tif") || f.getName().endsWith(".TIF")) {
+            //CPCGTools Hack. 
+            if(f.getName().startsWith("._")){
+                continue;
+            } 
+            //
             try {
                //this is where fixing dataset code occurs
                reader = new NDTiffReader(f);
@@ -110,9 +115,11 @@ public final class ResolutionLevel {
                throw new RuntimeException("Couldn't open file: " + f.toString());
             }
          } else if (f.getName().endsWith("index")) {
+            //CPCGTools Hack. 
             if(f.getName().startsWith("._")){
                 continue;
             } 
+            //
             indexMap = IndexEntryData.readIndexMap(f);
             if (firstImageWidth_ == 0) {
                firstImageWidth_ = (int) indexMap.values().iterator().next().pixWidth_;
